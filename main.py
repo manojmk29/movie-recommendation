@@ -8,11 +8,95 @@ import bs4 as bs
 import urllib.request
 import pickle
 import requests
+import pymongo
+from Cryptodome import Random
+from Cryptodome.Cipher import AES
+import hashlib
+from base64 import b64encode, b64decode
+mongo = pymongo.MongoClient(host="localhost",port=27017,serverSelectionTimeoutMS=10000)
+db = mongo.login
 
 # load the nlp model and tfidf vectorizer from disk
 filename = 'nlp_model.pkl'
 clf = pickle.load(open(filename, 'rb'))
 vectorizer = pickle.load(open('tranform.pkl','rb'))
+app = Flask(__name__)
+
+class AESCipher(object):
+    def __init__(self, key):
+        self.block_size = AES.block_size
+        self.key = hashlib.sha256(key.encode()).digest()
+
+    def encrypt(self, plain_text):
+        plain_text = self.__pad(plain_text)
+        iv = Random.new().read(self.block_size)
+        cipher = AES.new(self.key, AES.MODE_CBC, iv)
+        encrypted_text = cipher.encrypt(plain_text.encode())
+        return b64encode(iv + encrypted_text).decode("utf-8")
+
+    def decrypt(self, encrypted_text):
+        encrypted_text = b64decode(encrypted_text)
+        iv = encrypted_text[:self.block_size]
+        cipher = AES.new(self.key, AES.MODE_CBC, iv)
+        plain_text = cipher.decrypt(encrypted_text[self.block_size:]).decode("utf-8")
+        return self.__unpad(plain_text)
+
+    def __pad(self, plain_text):
+        number_of_bytes_to_pad = self.block_size - len(plain_text) % self.block_size
+        ascii_string = chr(number_of_bytes_to_pad)
+        padding_str = number_of_bytes_to_pad * ascii_string
+        padded_plain_text = plain_text + padding_str
+        return padded_plain_text
+
+    @staticmethod
+    def __unpad(plain_text):
+        last_character = plain_text[len(plain_text) - 1:]
+        return plain_text[:-ord(last_character)]
+
+class User:
+    def signup(self):
+        user={
+            "userid":request.form.get("userid"),
+            "password":request.form.get("password")
+        }
+        try:
+            user['password']=AESCipher("prime").encrypt(str(user['password']))
+            if db.users.find_one({ "userid": user['userid'] }):
+                return render_template('signup.html',error_message="USER ID ALREADY EXISTS")
+            responsedb=db.users.insert_one(user)
+            if responsedb:
+                suggestions = get_suggestions()                             
+                return render_template('home.html',suggestions=suggestions)         
+        except pymongo.errors.DuplicateKeyError:
+            return render_template('signup.html',error_message="USER ID ALREADY EXISTS")
+@app.route('/login/', methods = ['GET','POST'])
+def login():
+    if request.method == 'GET':
+        return render_template('login.html')
+    if request.method == 'POST':
+        userid = request.form['userid']
+        password = request.form['password']
+        try:
+            user = db.users.find_one({"userid": userid})
+            if(not user):
+                return render_template('login.html',error_message="WRONG USERNAME OR PASSWORD")
+            pswd=AESCipher("prime").decrypt(user["password"])
+            if (user and pswd==password):
+                suggestions = get_suggestions()
+                return render_template('home.html',suggestions=suggestions)
+            return render_template('login.html',error_message="WRONG USERNAME OR PASSWORD")
+        except ValueError:
+            return render_template('login.html',error_message="WRONG USERNAME OR PASSWORD")
+
+
+@app.route('/signup/', methods = ['GET','POST'])
+def signup():
+    if request.method == 'GET':
+        return render_template('signup.html')
+    if request.method == 'POST':
+        return(User().signup())
+
+
 
 def create_similarity():
     data = pd.read_csv('main_data.csv')
@@ -54,13 +138,12 @@ def get_suggestions():
     data = pd.read_csv('main_data.csv')
     return list(data['movie_title'].str.capitalize())
 
-app = Flask(__name__)
+
 
 @app.route("/")
 @app.route("/home")
 def home():
-    suggestions = get_suggestions()
-    return render_template('home.html',suggestions=suggestions)
+    return render_template('login.html')
 
 @app.route("/similarity",methods=["POST"])
 def similarity():
